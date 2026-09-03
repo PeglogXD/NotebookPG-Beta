@@ -1915,27 +1915,41 @@
             txtError.classList.add("hidden");
             txtErrorEmail.classList.add("hidden");
 
-            // Verificación local rápida contra el registro global conocido
+            // Verificación local instantánea contra el registro global
             const registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
+            const nombreExisteLocal = !!registroGlobal[nombreIngresado];
             let correoExisteLocal = false;
             if (emailRecuperar) {
                 for (const u of Object.values(registroGlobal)) {
                     if (u.email && u.email === emailRecuperar) { correoExisteLocal = true; break; }
                 }
             }
+
             if (correoExisteLocal) {
                 btn.disabled = false;
                 btn.innerHTML = 'Ingresar al Sistema';
                 txtErrorEmail.classList.remove("hidden");
                 return;
             }
-            verificarNombreLibreYRegistrar(nombreIngresado, emailRecuperar, btn, txtError, txtErrorEmail);
-        });
+            if (nombreExisteLocal) {
+                btn.disabled = false;
+                btn.innerHTML = 'Ingresar al Sistema';
+                txtError.classList.remove("hidden");
+                return;
+            }
 
-        function verificarNombreLibreYRegistrar(nombre, email, btn, txtError, txtErrorEmail) {
+            // Si el cliente MQTT no está conectado, registrar directamente (sin espera)
+            if (!clienteValidacion || !clienteValidacion.connected) {
+                registrarUsuario(nombreIngresado, emailRecuperar, btn);
+                return;
+            }
+
+            // Verificación MQTT rápida en background (máx 600ms)
             let nombreOcupado = false;
-            const subCanal = `wasapedro/v3/verificar/${nombre}`;
-            clienteValidacion.subscribe(subCanal);
+            const subCanal = "wasapedro/v3/verificar/" + nombreIngresado;
+            try {
+                clienteValidacion.subscribe(subCanal);
+            } catch(e) {}
 
             const manejarVerificacion = (topico, mensaje) => {
                 try {
@@ -1944,26 +1958,33 @@
                 } catch(e){}
             };
             clienteValidacion.on('message', manejarVerificacion);
-            clienteValidacion.publish(subCanal, JSON.stringify({ accion: "pregunta" }));
+            try {
+                clienteValidacion.publish(subCanal, JSON.stringify({ accion: "pregunta" }));
+            } catch(e) {}
 
             setTimeout(() => {
-                clienteValidacion.unsubscribe(subCanal);
-                clienteValidacion.off('message', manejarVerificacion);
+                try {
+                    clienteValidacion.unsubscribe(subCanal);
+                    clienteValidacion.off('message', manejarVerificacion);
+                } catch(e) {}
                 if (nombreOcupado) {
                     btn.disabled = false;
                     btn.innerHTML = 'Ingresar al Sistema';
                     txtError.classList.remove("hidden");
                 } else {
-                    miNombre = nombre;
-                    localStorage.setItem("wasapedro_mqtt_name", miNombre);
-                    if (email) localStorage.setItem("wasapedro_gmail_link", email);
-                    // Guardar en el registro global para que otros lo detecten localmente
-                    let registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
-                    registroGlobal[nombre] = { usuario: nombre, foto: "", email: email || "" };
-                    localStorage.setItem("wasapedro_registro_global", JSON.stringify(registroGlobal));
-                    inicializarUI();
+                    registrarUsuario(nombreIngresado, emailRecuperar, btn);
                 }
-            }, 1200);
+            }, 600);
+        });
+
+        function registrarUsuario(nombre, email, btn) {
+            miNombre = nombre;
+            localStorage.setItem("wasapedro_mqtt_name", miNombre);
+            if (email) localStorage.setItem("wasapedro_gmail_link", email);
+            let registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
+            registroGlobal[nombre] = { usuario: nombre, foto: "", email: email || "" };
+            localStorage.setItem("wasapedro_registro_global", JSON.stringify(registroGlobal));
+            inicializarUI();
         }
 
         function abrirModalGrupo() { document.getElementById("modal-grupo").classList.remove("hidden"); }
