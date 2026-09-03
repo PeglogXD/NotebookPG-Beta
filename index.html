@@ -317,8 +317,8 @@
                 </div>
 
                 <div class="px-3 py-2 bg-brand-500/5 border-b border-dark-700/50">
-                    <h2 class="text-[10px] font-bold text-gray-400 uppercase mb-1">Notificaciones</h2>
-                    <div id="lista-notificaciones" class="space-y-1 max-h-20 overflow-y-auto"></div>
+                    <h2 class="text-[10px] font-bold text-gray-400 uppercase mb-1 flex items-center gap-1.5">Notificaciones <span id="badge-notif-count" class="hidden bg-brand-600 text-white text-[9px] rounded-full px-1.5 py-0.5 leading-none"></span></h2>
+                    <div id="lista-notificaciones" class="space-y-1 max-h-24 overflow-y-auto"></div>
                 </div>
 
                 <nav class="flex-1 overflow-y-auto p-2" id="lista-amigos">
@@ -998,6 +998,7 @@
         let colaEnvios = leerJSONLocal("wasapedro_cola_envios", []);
         let registrosPresenciaAmigos = {}; 
         let notificacionesPendientes = leerJSONLocal("wasapedro_notif_pendientes", {});
+        let avisosPendientes = leerJSONLocal("wasapedro_avisos", {});
         let temaActual = localStorage.getItem("wasapedro_theme_color") || "#3b82f6";
         
         // Lecturas / Read receipts
@@ -1224,6 +1225,13 @@
 
             const esGrupo = datosGrupos[chatActivo];
             if (esGrupo) payload.nombreGrupo = datosGrupos[chatActivo].nombre;
+
+            // Aviso de multimedia para el destinatario (persiste aunque esté offline)
+            if (esGrupo) {
+                publicarAvisoEnvio(datosGrupos[chatActivo].miembros || [], 'grupo', chatActivo, datosGrupos[chatActivo].nombre, false, tipoMedia);
+            } else {
+                publicarAvisoEnvio([chatActivo], 'media', '', '', false, tipoMedia);
+            }
 
             const objetoHistorial = { ...payload, enviado: false };
             if (!historialesDeChats[chatActivo]) historialesDeChats[chatActivo] = [];
@@ -2033,6 +2041,7 @@
                 clienteMqtt.subscribe(`wasapedro/v3/status/fotos`); 
                 clienteMqtt.subscribe(`wasapedro/v3/status/presencia`); 
                 clienteMqtt.subscribe(`wasapedro/v3/registry/announce`, { qos: 1 });
+                clienteMqtt.subscribe(`wasapedro/v3/avisos/${miNombre}/+`);
                 
                 Object.keys(datosGrupos).forEach(id => clienteMqtt.subscribe(`wasapedro/v3/grupo/${id}`, { qos: 1 }));
 
@@ -2053,6 +2062,32 @@
 
             clienteMqtt.on('message', (topico, mensaje) => {
                 try {
+                    // Avisos "te escribió" (retained): llegan al abrir la app aunque se haya estado offline
+                    const prefijoAvisos = `wasapedro/v3/avisos/${miNombre}/`;
+                    if (topico.startsWith(prefijoAvisos)) {
+                        const emisorAviso = topico.slice(prefijoAvisos.length);
+                        const contenidoAviso = mensaje.toString().trim();
+                        if (!contenidoAviso) {
+                            delete avisosPendientes[emisorAviso];
+                        } else {
+                            try {
+                                const aviso = JSON.parse(contenidoAviso);
+                                if (aviso.de) {
+                                    avisosPendientes[emisorAviso] = {
+                                        tipo: aviso.tipo || 'mensaje',
+                                        esArchivo: !!aviso.esArchivo,
+                                        tipoMedia: aviso.tipoMedia || '',
+                                        idGrupo: aviso.idGrupo || '',
+                                        nombreGrupo: aviso.nombreGrupo || '',
+                                        ts: aviso.ts || Date.now()
+                                    };
+                                }
+                            } catch(e) {}
+                        }
+                        localStorage.setItem("wasapedro_avisos", JSON.stringify(avisosPendientes));
+                        actualizarBuzonNotificacionesUI();
+                        return;
+                    }
                     const data = JSON.parse(mensaje.toString());
                     if (data.emisor && !REGEX_IDENTIFICADOR.test(String(data.emisor))) return;
                     if (data.usuario && !REGEX_IDENTIFICADOR.test(String(data.usuario))) return;
@@ -2281,6 +2316,12 @@
 
                     moverChatAlPrincipio(idChat);
 
+                    // El mensaje real llegó estando conectado: el aviso ya cumplió su función
+                    const avisoActual = avisosPendientes[data.emisor];
+                    if (avisoActual && (esGrupo ? avisoActual.idGrupo === idChat : !avisoActual.idGrupo)) {
+                        limpiarAvisoPendiente(data.emisor);
+                    }
+
                     if (chatActivo === idChat) {
                         renderizarMensajes();
                     } else {
@@ -2350,6 +2391,28 @@
             abrirChat(nom);
         }
 
+        function publicarAvisoEnvio(destinatarios, tipo, idGrupo, nombreGrupo, esArchivo, tipoMedia) {
+            if (!clienteMqtt || !clienteMqtt.connected || !miNombre) return;
+            const aviso = { de: miNombre, tipo: tipo, esArchivo: !!esArchivo, tipoMedia: tipoMedia || '', idGrupo: idGrupo || '', nombreGrupo: nombreGrupo || '', ts: Date.now() };
+            const textoAviso = JSON.stringify(aviso);
+            (Array.isArray(destinatarios) ? destinatarios : []).forEach(dest => {
+                if (!dest || dest === miNombre) return;
+                try {
+                    clienteMqtt.publish(`wasapedro/v3/avisos/${dest}/${miNombre}`, textoAviso, { qos: 1, retain: true });
+                } catch(e) {}
+            });
+        }
+
+        function limpiarAvisoPendiente(de) {
+            if (!de) return;
+            delete avisosPendientes[de];
+            localStorage.setItem("wasapedro_avisos", JSON.stringify(avisosPendientes));
+            if (clienteMqtt && clienteMqtt.connected) {
+                try { clienteMqtt.publish(`wasapedro/v3/avisos/${miNombre}/${de}`, "", { qos: 1, retain: true }); } catch(e) {}
+            }
+            actualizarBuzonNotificacionesUI();
+        }
+
         function guardarLectura(chatId) {
             if (!lecturas[chatId]) lecturas[chatId] = {};
             if (typeof lecturas[chatId] === "number") lecturas[chatId] = { _yo: lecturas[chatId] };
@@ -2393,6 +2456,15 @@
             delete notificacionesPendientes[id];
             localStorage.setItem("wasapedro_notif_pendientes", JSON.stringify(notificacionesPendientes));
             actualizarBuzonNotificacionesUI();
+
+            // Limpiar avisos "te escribió" del chat que se acaba de abrir
+            const esGrpChat = !!datosGrupos[id];
+            Object.keys(avisosPendientes).forEach(de => {
+                const av = avisosPendientes[de] || {};
+                if (esGrpChat ? av.idGrupo === id : (de === id && !av.idGrupo)) {
+                    limpiarAvisoPendiente(de);
+                }
+            });
 
             document.getElementById("pantalla-chat-vacia").classList.add("hidden");
             document.getElementById("pantalla-chat-activa").classList.remove("hidden");
@@ -2544,7 +2616,6 @@
                             ${contenido}
                             <div class="flex items-center justify-end gap-1 mt-1">
                                 <span class="text-[9px] text-gray-400 font-mono">${hora}</span>
-                                ${esMio ? `<i class="ph ${m.enviado ? 'ph-checks text-blue-300' : 'ph-clock text-gray-400'} text-xs"></i>` : ''}
                             </div>
                         </div>
                         ${lecturaHtml}
@@ -2572,6 +2643,13 @@
 
             const esGrupo = !!datosGrupos[chatActivo];
             if (esGrupo) payload.nombreGrupo = datosGrupos[chatActivo].nombre;
+
+            // Aviso "te escribió" para el destinatario (persiste aunque esté offline)
+            if (esGrupo) {
+                publicarAvisoEnvio(datosGrupos[chatActivo].miembros || [], 'grupo', chatActivo, datosGrupos[chatActivo].nombre, false);
+            } else {
+                publicarAvisoEnvio([chatActivo], 'mensaje', '', '', false);
+            }
 
             const objetoHistorial = { ...payload, enviado: false };
             if (!historialesDeChats[chatActivo]) historialesDeChats[chatActivo] = [];
@@ -2613,6 +2691,13 @@
 
                 const esGrupo = !!datosGrupos[chatActivo];
                 if (esGrupo) payload.nombreGrupo = datosGrupos[chatActivo].nombre;
+
+                // Aviso de archivo para el destinatario (persiste aunque esté offline)
+                if (esGrupo) {
+                    publicarAvisoEnvio(datosGrupos[chatActivo].miembros || [], 'grupo', chatActivo, datosGrupos[chatActivo].nombre, true);
+                } else {
+                    publicarAvisoEnvio([chatActivo], 'archivo', '', '', false);
+                }
 
                 if (!historialesDeChats[chatActivo]) historialesDeChats[chatActivo] = [];
                 historialesDeChats[chatActivo].push({ ...payload, enviado: false });
@@ -2686,9 +2771,29 @@
             const cont = document.getElementById("lista-notificaciones");
             if (!cont) return;
             cont.innerHTML = "";
+
+            const totalAvisos = Object.keys(avisosPendientes).length + Object.keys(notificacionesPendientes).length;
+            const badge = document.getElementById("badge-notif-count");
+            if (badge) {
+                badge.textContent = totalAvisos > 0 ? totalAvisos : "";
+                badge.classList.toggle("hidden", totalAvisos === 0);
+            }
+
+            // Avisos "te escribió" (incluyen mensajes recibidos estando offline)
+            Object.keys(avisosPendientes).forEach(de => {
+                const av = avisosPendientes[de] || {};
+                const nombre = apodosContactos[de] || de;
+                let texto = `${nombre} te escribió`;
+                if (av.tipo === 'archivo') texto = `${nombre} te envió un archivo`;
+                else if (av.tipo === 'media') texto = `${nombre} te envió ${av.tipoMedia === 'audio' ? 'una nota de voz' : av.tipoMedia === 'gif' ? 'un GIF' : 'un sticker'}`;
+                else if (av.tipo === 'grupo') texto = av.esArchivo ? `${nombre} te envió un archivo en ${av.nombreGrupo}` : `${nombre} te escribió en ${av.nombreGrupo}`;
+                const chatDestino = av.idGrupo || de;
+                cont.innerHTML += `<div onclick="abrirChat('${escaparJS(chatDestino)}')" class="text-[11px] text-amber-300 hover:underline cursor-pointer truncate flex items-center gap-1.5"><i class="ph ph-bell-ring text-[10px]"></i><span class="truncate">${escaparHTML(texto)}</span></div>`;
+            });
+
             const ids = Object.keys(notificacionesPendientes);
-            if (ids.length === 0) {
-                cont.innerHTML = `<span class="text-[11px] text-gray-600 italic">Sin notificaciones</span>`;
+            if (ids.length === 0 && totalAvisos === 0) {
+                cont.innerHTML += `<span class="text-[11px] text-gray-600 italic">Sin notificaciones</span>`;
                 return;
             }
             ids.forEach(id => {
