@@ -275,6 +275,7 @@
                     <input type="text" id="input-nombre" placeholder="Nombre de usuario" class="w-full bg-dark-800/50 border border-dark-700 text-white rounded-xl py-3.5 px-4 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all text-sm placeholder-gray-500">
                 </div>
                 <p id="error-registro" class="text-xs text-red-400 text-left pl-2 hidden transition-all">⚠️ Este nombre ya está en uso.</p>
+                <p id="error-email" class="text-xs text-red-400 text-left pl-2 hidden transition-all">⚠️ Este correo ya está registrado en otra cuenta.</p>
                 
                 <div class="relative">
                     <input type="email" id="input-recuperar-email" placeholder="Correo para respaldo (Opcional)" class="w-full bg-dark-800/50 border border-dark-700 text-white rounded-xl py-3.5 px-4 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all text-sm placeholder-gray-500">
@@ -1908,13 +1909,30 @@
             if (!REGEX_IDENTIFICADOR.test(nombreIngresado)) {
                 return alert("Usa entre 2 y 32 caracteres: letras, números, guion o guion bajo. Sin espacios.");
             }
+            const txtErrorEmail = document.getElementById("error-email");
             btn.disabled = true;
-            btn.innerHTML = '<i class="ph ph-spinner-gap animate-spin text-xl"></i> Conectando...';
+            btn.innerHTML = '<i class="ph ph-spinner-gap animate-spin text-xl"></i> Verificando...';
             txtError.classList.add("hidden");
-            verificarNombreLibreYRegistrar(nombreIngresado, emailRecuperar, btn, txtError);
+            txtErrorEmail.classList.add("hidden");
+
+            // Verificación local rápida contra el registro global conocido
+            const registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
+            let correoExisteLocal = false;
+            if (emailRecuperar) {
+                for (const u of Object.values(registroGlobal)) {
+                    if (u.email && u.email === emailRecuperar) { correoExisteLocal = true; break; }
+                }
+            }
+            if (correoExisteLocal) {
+                btn.disabled = false;
+                btn.innerHTML = 'Ingresar al Sistema';
+                txtErrorEmail.classList.remove("hidden");
+                return;
+            }
+            verificarNombreLibreYRegistrar(nombreIngresado, emailRecuperar, btn, txtError, txtErrorEmail);
         });
 
-        function verificarNombreLibreYRegistrar(nombre, email, btn, txtError) {
+        function verificarNombreLibreYRegistrar(nombre, email, btn, txtError, txtErrorEmail) {
             let nombreOcupado = false;
             const subCanal = `wasapedro/v3/verificar/${nombre}`;
             clienteValidacion.subscribe(subCanal);
@@ -1939,6 +1957,10 @@
                     miNombre = nombre;
                     localStorage.setItem("wasapedro_mqtt_name", miNombre);
                     if (email) localStorage.setItem("wasapedro_gmail_link", email);
+                    // Guardar en el registro global para que otros lo detecten localmente
+                    let registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
+                    registroGlobal[nombre] = { usuario: nombre, foto: "", email: email || "" };
+                    localStorage.setItem("wasapedro_registro_global", JSON.stringify(registroGlobal));
                     inicializarUI();
                 }
             }, 1200);
