@@ -2186,7 +2186,7 @@
                             const chatId = topico.replace("wasapedro/v3/read/grupo/", "").replace("wasapedro/v3/read/", "");
                             if (!lecturas[chatId]) lecturas[chatId] = {};
                             if (typeof lecturas[chatId] === "number") {
-                                lecturas[chatId] = { visto: lecturas[chatId] };
+                                lecturas[chatId] = { _yo: lecturas[chatId] };
                             }
                             lecturas[chatId][data.emisor] = data.visto;
                             localStorage.setItem("wasapedro_lecturas", JSON.stringify(lecturas));
@@ -2351,7 +2351,9 @@
         }
 
         function guardarLectura(chatId) {
-            lecturas[chatId] = Date.now();
+            if (!lecturas[chatId]) lecturas[chatId] = {};
+            if (typeof lecturas[chatId] === "number") lecturas[chatId] = { _yo: lecturas[chatId] };
+            lecturas[chatId]._yo = Date.now();
             localStorage.setItem("wasapedro_lecturas", JSON.stringify(lecturas));
         }
 
@@ -2522,24 +2524,28 @@
                             const textoLectura = nombres.length <= 2
                                 ? 'Visto por ' + nombres.join(' y ')
                                 : 'Visto por ' + nombres[0] + ' y +' + (nombres.length - 1);
-                            lecturaHtml = '<span class="text-[9px] text-green-400 block text-right mt-0.5">' + textoLectura + '</span>';
+                            lecturaHtml = '<div class="text-[9px] text-green-400 text-right pr-1 pt-0.5">' + textoLectura + '</div>';
                         }
                     } else if (!esGrupo) {
-                        const visto = lecturas[chatActivo];
-                        const vistoTs = typeof visto === 'object' ? visto[chatActivo] : visto;
+                        const lectChat = lecturas[chatActivo];
+                        const lectObj = (lectChat && typeof lectChat === 'object') ? lectChat : {};
+                        // El otro usuario en 1-a-1 es chatActivo
+                        const vistoTs = lectObj[chatActivo] || 0;
                         if (vistoTs && vistoTs >= m.timestamp) {
-                            lecturaHtml = '<span class="text-[9px] text-green-400 block text-right mt-0.5">Visto ' + tiempoRelativo(vistoTs) + '</span>';
+                            lecturaHtml = '<div class="text-[9px] text-green-400 text-right pr-1 pt-0.5">Visto ' + tiempoRelativo(vistoTs) + '</div>';
                         }
                     }
                 }
 
                 div.innerHTML = `
-                    <div class="mensaje-seleccionable max-w-[75%] ${esMio ? 'bg-brand-600 rounded-2xl rounded-tr-none' : 'bg-dark-800 border border-dark-700 rounded-2xl rounded-tl-none'} p-3 shadow-md">
-                        ${!esMio && datosGrupos[chatActivo] ? `<span class="text-[10px] font-bold text-brand-400 block mb-1">${escaparHTML(m.emisor)}</span>` : ''}
-                        ${contenido}
-                        <div class="flex items-center justify-end gap-1 mt-1">
-                            <span class="text-[9px] text-gray-400 font-mono">${hora}</span>
-                            ${esMio ? `<i class="ph ${m.enviado ? 'ph-checks text-blue-300' : 'ph-clock text-gray-400'} text-xs"></i>` : ''}
+                    <div class="max-w-[75%] ${esMio ? 'items-end' : 'items-start'} flex flex-col">
+                        <div class="mensaje-seleccionable ${esMio ? 'bg-brand-600 rounded-2xl rounded-tr-none' : 'bg-dark-800 border border-dark-700 rounded-2xl rounded-tl-none'} p-3 shadow-md w-full">
+                            ${!esMio && datosGrupos[chatActivo] ? `<span class="text-[10px] font-bold text-brand-400 block mb-1">${escaparHTML(m.emisor)}</span>` : ''}
+                            ${contenido}
+                            <div class="flex items-center justify-end gap-1 mt-1">
+                                <span class="text-[9px] text-gray-400 font-mono">${hora}</span>
+                                ${esMio ? `<i class="ph ${m.enviado ? 'ph-checks text-blue-300' : 'ph-clock text-gray-400'} text-xs"></i>` : ''}
+                            </div>
                         </div>
                         ${lecturaHtml}
                     </div>
