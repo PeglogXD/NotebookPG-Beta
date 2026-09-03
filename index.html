@@ -777,7 +777,7 @@
             }
         }
 
-        async function mostrarNotificacionSW(titulo, cuerpo, url = './') {
+        async function mostrarNotificacionSW(titulo, cuerpo, url = './', tag = 'wasapedro-mensaje') {
             try {
                 if (!('Notification' in window) || Notification.permission !== 'granted') {
                     return;
@@ -796,7 +796,7 @@
                     badge: './icon.svg',
                     vibrate: [200, 100, 200],
                     data: { url },
-                    tag: 'wasapedro-mensaje',
+                    tag: tag,
                     renotify: true
                 });
             } catch (error) {
@@ -807,24 +807,31 @@
         function notificarMensajeRecibido(data, idChat, esGrupo) {
             if (!document.hidden || chatActivo === idChat) return;
 
-            const nombre = data.emisor || 'Nuevo mensaje';
+            const nombre = apodosContactos[data.emisor] || data.emisor || 'Nuevo mensaje';
             let texto = '';
 
             if (data.texto && data.texto.trim()) {
                 texto = data.texto.trim();
+            } else if (data.urlArchivo) {
+                texto = '📎 Te envió un archivo';
             } else if (data.tipoMedia === 'gif') {
-                texto = '🖼️ Te envió una imagen';
+                texto = '🎞️ Te envió un GIF';
+            } else if (data.tipoMedia === 'sticker') {
+                texto = '🪩 Te envió un sticker';
             } else if (data.tipoMedia === 'audio') {
                 texto = '🎤 Te envió una nota de voz';
             } else {
                 texto = '💬 Nuevo mensaje recibido';
             }
 
+            if (texto.length > 140) texto = texto.slice(0, 137) + '…';
+
             const titulo = esGrupo
-                ? `${nombre} · ${datosGrupos[idChat]?.nombre || 'Grupo'}`
+                ? `${nombre} · ${(datosGrupos[idChat] && datosGrupos[idChat].nombre) || 'Grupo'}`
                 : nombre;
 
-            mostrarNotificacionSW(titulo, texto, './');
+            // Un tag por chat: las notificaciones de chats distintos no se reemplazan entre sí
+            mostrarNotificacionSW(titulo, texto, './', 'wasapedro-chat-' + idChat);
         }
 
         // LÓGICA DE NOTEBOOKPG
@@ -960,7 +967,7 @@
                 document.body.className = "h-screen w-screen flex flex-col overflow-hidden select-none relative bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-dark-900 text-[#e4e4e7]";
                 document.getElementById("meta-theme").setAttribute("content", "#09090b");
                 
-                inicializarUI();
+                inicializarUI(); prepararNotificacionesSW(true);
             } else {
                 alert("El código de plantilla no es válido o no existe.");
             }
@@ -1995,7 +2002,7 @@
             let registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
             registroGlobal[nombre] = { usuario: nombre, foto: "", email: email || "" };
             localStorage.setItem("wasapedro_registro_global", JSON.stringify(registroGlobal));
-            inicializarUI();
+            inicializarUI(); prepararNotificacionesSW(true);
         }
 
         function abrirModalGrupo() { document.getElementById("modal-grupo").classList.remove("hidden"); }
