@@ -999,6 +999,9 @@
         let registrosPresenciaAmigos = {}; 
         let notificacionesPendientes = leerJSONLocal("wasapedro_notif_pendientes", {});
         let temaActual = localStorage.getItem("wasapedro_theme_color") || "#3b82f6";
+        
+        // Lecturas / Read receipts
+        let lecturas = leerJSONLocal("wasapedro_lecturas", {});
 
         let esAdmin = false;
 
@@ -2033,6 +2036,15 @@
                 
                 Object.keys(datosGrupos).forEach(id => clienteMqtt.subscribe(`wasapedro/v3/grupo/${id}`, { qos: 1 }));
 
+                // Suscribirse a lecturas de chats conocidos
+                listaAmigosActivos.forEach(id => {
+                    try {
+                        const esGrp = !!datosGrupos[id];
+                        const topico = esGrp ? `wasapedro/v3/read/grupo/${id}` : `wasapedro/v3/read/${id}`;
+                        clienteMqtt.subscribe(topico, { qos: 1 });
+                    } catch(e) {}
+                });
+
                 clienteMqtt.publish(`wasapedro/v3/registry/announce`, JSON.stringify({ usuario: miNombre, foto: miFotoB64 }), { qos: 1, retain: true });
 
                 actualizarListaAmigosUI();
@@ -2164,6 +2176,21 @@
                         } else {
                             localStorage.setItem("wasapedro_ban_status", JSON.stringify(data));
                             mostrarPantallaBanAbsoluto(data.tipo, data.razon);
+                        }
+                        return;
+                    }
+
+                    // Recepción de lecturas
+                    if (topico.startsWith("wasapedro/v3/read/")) {
+                        if (data.emisor && data.emisor !== miNombre && data.visto) {
+                            const chatId = topico.replace("wasapedro/v3/read/grupo/", "").replace("wasapedro/v3/read/", "");
+                            if (!lecturas[chatId]) lecturas[chatId] = {};
+                            if (typeof lecturas[chatId] === "number") {
+                                lecturas[chatId] = { visto: lecturas[chatId] };
+                            }
+                            lecturas[chatId][data.emisor] = data.visto;
+                            localStorage.setItem("wasapedro_lecturas", JSON.stringify(lecturas));
+                            if (chatActivo === chatId) renderizarMensajes();
                         }
                         return;
                     }
@@ -2323,7 +2350,43 @@
             abrirChat(nom);
         }
 
+        function guardarLectura(chatId) {
+            lecturas[chatId] = Date.now();
+            localStorage.setItem("wasapedro_lecturas", JSON.stringify(lecturas));
+        }
+
+        function tiempoRelativo(timestamp) {
+            if (!timestamp) return "";
+            const diff = Date.now() - timestamp;
+            const seg = Math.floor(diff / 1000);
+            if (seg < 60) return "ahora";
+            const min = Math.floor(seg / 60);
+            if (min < 60) return "hace " + min + " min";
+            const hrs = Math.floor(min / 60);
+            if (hrs < 24) return "hace " + hrs + " h";
+            const dias = Math.floor(hrs / 24);
+            if (dias < 7) return "hace " + dias + " d";
+            return new Date(timestamp).toLocaleDateString([], { day: '2-digit', month: 'short' });
+        }
+
+        function publicarLectura(chatId) {
+            if (!clienteMqtt || !clienteMqtt.connected) return;
+            const esGrupo = !!datosGrupos[chatId];
+            const topico = esGrupo
+                ? "wasapedro/v3/read/grupo/" + chatId
+                : "wasapedro/v3/read/" + chatId;
+            const payload = {
+                emisor: miNombre,
+                visto: Date.now(),
+                esGrupo: esGrupo
+            };
+            try {
+                clienteMqtt.publish(topico, JSON.stringify(payload), { qos: 1 });
+            } catch(e) {}
+        }
+
         function abrirChat(id) {
+
             chatActivo = id;
             delete notificacionesPendientes[id];
             localStorage.setItem("wasapedro_notif_pendientes", JSON.stringify(notificacionesPendientes));
@@ -2366,6 +2429,17 @@
             renderizarFotoCabeceraChat(id);
             renderizarMensajes();
             actualizarListaAmigosUI();
+
+            // Publicar y suscribir lecturas
+            guardarLectura(id);
+            publicarLectura(id);
+            if (clienteMqtt && clienteMqtt.connected) {
+                const esGrp = !!datosGrupos[id];
+                const topicoLectura = esGrp
+                    ? "wasapedro/v3/read/grupo/" + id
+                    : "wasapedro/v3/read/" + id;
+                try { clienteMqtt.subscribe(topicoLectura, { qos: 1 }); } catch(e) {}
+            }
         }
 
         function renderizarFotoCabeceraChat(id) {
@@ -2436,6 +2510,29 @@
 
                 const hora = new Date(m.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+                // Calcular estado de lectura para mensajes propios
+                let lecturaHtml = '';
+                if (esMio && m.enviado) {
+                    const esGrupo = !!datosGrupos[chatActivo];
+                    if (esGrupo && lecturas[chatActivo] && typeof lecturas[chatActivo] === 'object') {
+                        const miembros = datosGrupos[chatActivo].miembros || [];
+                        const leidoPor = miembros.filter(u => u !== miNombre && lecturas[chatActivo][u] && lecturas[chatActivo][u] >= m.timestamp);
+                        if (leidoPor.length > 0) {
+                            const nombres = leidoPor.map(u => apodosContactos[u] || u);
+                            const textoLectura = nombres.length <= 2
+                                ? 'Visto por ' + nombres.join(' y ')
+                                : 'Visto por ' + nombres[0] + ' y +' + (nombres.length - 1);
+                            lecturaHtml = '<span class="text-[9px] text-green-400 block text-right mt-0.5">' + textoLectura + '</span>';
+                        }
+                    } else if (!esGrupo) {
+                        const visto = lecturas[chatActivo];
+                        const vistoTs = typeof visto === 'object' ? visto[chatActivo] : visto;
+                        if (vistoTs && vistoTs >= m.timestamp) {
+                            lecturaHtml = '<span class="text-[9px] text-green-400 block text-right mt-0.5">Visto ' + tiempoRelativo(vistoTs) + '</span>';
+                        }
+                    }
+                }
+
                 div.innerHTML = `
                     <div class="mensaje-seleccionable max-w-[75%] ${esMio ? 'bg-brand-600 rounded-2xl rounded-tr-none' : 'bg-dark-800 border border-dark-700 rounded-2xl rounded-tl-none'} p-3 shadow-md">
                         ${!esMio && datosGrupos[chatActivo] ? `<span class="text-[10px] font-bold text-brand-400 block mb-1">${escaparHTML(m.emisor)}</span>` : ''}
@@ -2444,6 +2541,7 @@
                             <span class="text-[9px] text-gray-400 font-mono">${hora}</span>
                             ${esMio ? `<i class="ph ${m.enviado ? 'ph-checks text-blue-300' : 'ph-clock text-gray-400'} text-xs"></i>` : ''}
                         </div>
+                        ${lecturaHtml}
                     </div>
                 `;
                 contenedor.appendChild(div);
