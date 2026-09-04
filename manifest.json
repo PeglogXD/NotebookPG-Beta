@@ -1,6 +1,6 @@
 {
-  "name": "NotebookPG - PG Studio",
-  "short_name": "NotebookPG",
+  "name": "Word",
+  "short_name": "Anotaciones",
   "id": "./",
   "start_url": "./index.html",
   "scope": "./",
