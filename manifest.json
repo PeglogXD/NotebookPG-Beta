@@ -10,7 +10,7 @@
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "./icon.svg",
+      "src": "https://img.icons8.com/fluent/1200/microsoft-word-2019.jpg",
       "type": "image/svg+xml",
       "sizes": "any",
       "purpose": "any maskable"
