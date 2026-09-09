@@ -987,7 +987,7 @@
         function volverANotebookPG() {
             // Si hay una llamada en curso, avisar antes de salir
             if (llamadaEnCurso) {
-                if (!confirm("Hay una llamada en curso. \u00bfSalir de todos modos?")) return;
+                if (!confirm("Hay una llamada en curso. ¿Salir de todos modos?")) return;
                 finalizarLlamada();
             }
             if (clienteMqtt) {
@@ -1326,6 +1326,48 @@
             llamadaEntrantePendiente = null;
         }
 
+        // Realiza la conexión WebRTC hacia el usuario que aceptó, esperando a que
+        // PeerJS esté listo y reintentando por si el destinatario aún se estaba registrando.
+        async function marcarLlamadaSaliente(usuario, data) {
+            const stream = await asegurarStreamLocal();
+            if (!stream) {
+                alert('No se pudo acceder a tu cámara o micrófono.');
+                finalizarLlamada(false);
+                return;
+            }
+            const listo = await esperarPeerListo(8000);
+            if (!listo || !llamadaEnCurso) return;
+
+            const peerDestinoBase = data.peerId || ('wasapedro_peer_' + usuario);
+            const metadatos = { emisor: miNombre, esGrupo: esLlamadaGrupal, idChat: data.idChat || chatActivo };
+
+            const intentar = (intentosRestantes) => {
+                if (!llamadaEnCurso || !peerInstance || peerInstance.destroyed) return;
+                // El destino pudo haberse registrado con id con sufijo: probar el base y variantes
+                const peerCall = peerInstance.call(peerDestinoBase, stream, { metadata: metadatos });
+
+                // Si en 3s no se estableció (peer-unavailable u otro fallo), reintentar
+                const timeoutFallo = setTimeout(() => {
+                    if (!llamadaEnCurso) return;
+                    if (peerCall.open) return;
+                    try { peerCall.close(); } catch(e) {}
+                    delete llamadasPeers[usuario];
+                    if (intentosRestantes > 0) {
+                        setTimeout(() => intentar(intentosRestantes - 1), 1200);
+                    }
+                }, 3000);
+
+                peerCall.on('stream', () => clearTimeout(timeoutFallo));
+                peerCall.on('close', () => clearTimeout(timeoutFallo));
+
+                llamadasPeers[usuario] = peerCall;
+                if (!esLlamadaGrupal) llamadaPeer = peerCall;
+                vincularEventosLlamadaPeer(peerCall, usuario);
+            };
+
+            intentar(3);
+        }
+
         function mostrarModalLlamadaEntrante(data) {
             llamadaEntrantePendiente = data;
             const modal = document.getElementById('modal-llamada-entrante');
@@ -1380,10 +1422,13 @@
             prepararInterfazLlamada(esGrupo, idChatOrigen, emisor);
 
             try {
-                streamLocal = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                document.getElementById('video-local').srcObject = streamLocal;
-                miCamaraActiva = true;
-                miMicActivo = true;
+                const stream = await asegurarStreamLocal();
+                if (!stream) throw new Error('sin medios');
+
+                // Esperar a que PeerJS esté registrado antes de publicar la respuesta,
+                // para que el que llama no reciba "peer-unavailable".
+                const listo = await esperarPeerListo(8000);
+                if (!listo) throw new Error('peer no listo');
 
                 const respuesta = {
                     tipoSist: 'respuesta_llamada',
@@ -1548,10 +1593,132 @@
             }
         }
 
-        function inicializarPeerJS() {
+        let peerListo = false;
+        let intentosPeerId = 0;
+
+        function generarIdPeer() {
+            return 'wasapedro_peer_' + miNombre + (intentosPeerId > 0 ? '_' + Math.random().toString(36).slice(2, 7) : '');
+        }
+
+        function esperarPeerListo(timeout = 5000) {
+            return new Promise((resolve) => {
+                if (peerListo && peerInstance && !peerInstance.destroyed) return resolve(true);
+                const inicio = Date.now();
+                const timer = setInterval(() => {
+                    if (peerListo && peerInstance && !peerInstance.destroyed) {
+                        clearInterval(timer);
+                        resolve(true);
+                    } else if (Date.now() - inicio > timeout) {
+                        clearInterval(timer);
+                        resolve(false);
+                    } else if (!peerInstance || peerInstance.destroyed) {
+                        inicializarPeerJS();
+                    }
+                }, 150);
+            });
+        }
+
+        // Obtiene el stream local; si la cámara falla, intenta solo audio para no romper la llamada
+        async function asegurarStreamLocal() {
+            if (streamLocal && streamLocal.active) return streamLocal;
+            try {
+                streamLocal = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                miCamaraActiva = true;
+                miMicActivo = true;
+            } catch (e) {
+                console.warn('Cámara no disponible, intentando solo audio:', e);
+                try {
+                    streamLocal = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    miCamaraActiva = false;
+                    miMicActivo = true;
+                    // Avisar al otro lado que no hay video (mostrará la foto de perfil)
+                    if (clienteMqtt && clienteMqtt.connected && chatActivo) {
+                        const topico = esLlamadaGrupal ? `wasapedro/v3/grupo/${chatActivo}` : `wasapedro/v3/chat/${chatActivo}`;
+                        clienteMqtt.publish(topico, JSON.stringify({
+                            tipoSist: "camara_estado",
+                            emisor: miNombre,
+                            videoActivo: false
+                        }), { qos: 1 });
+                    }
+                } catch (e2) {
+                    console.error('Sin acceso a micrófono ni cámara:', e2);
+                    return null;
+                }
+            }
+            const videoLocal = document.getElementById('video-local');
+            if (videoLocal) videoLocal.srcObject = streamLocal;
+            return streamLocal;
+        }
+
+        // Marca (cuelga y elimina) los peers cuyo destino no respondió, para permitir reintento
+        function marcarPeerNoDisponible(peerIdDestino) {
+            Object.entries(llamadasPeers || {}).forEach(([usuario, call]) => {
+                if (call?.peer === peerIdDestino && !call.open) {
+                    try { call.close(); } catch(e) {}
+                    delete llamadasPeers[usuario];
+                }
+            });
+        }
+
+        async function inicializarPeerJS() {
+            if (typeof Peer === 'undefined') {
+                console.warn('PeerJS no está disponible.');
+                return;
+            }
             if (peerInstance && !peerInstance.destroyed) return;
-            miPeerId = 'wasapedro_peer_' + miNombre;
-            peerInstance = new Peer(miPeerId);
+            if (!miNombre) return;
+
+            miPeerId = generarIdPeer();
+            peerListo = false;
+
+            peerInstance = new Peer(miPeerId, {
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:global.stun.twilio.com:3478' }
+                    ]
+                },
+                debug: 1
+            });
+
+            peerInstance.on('open', (id) => {
+                peerListo = true;
+                miPeerId = id;
+            });
+
+            peerInstance.on('disconnected', () => {
+                peerListo = false;
+                setTimeout(() => {
+                    try { peerInstance?.reconnect(); } catch(e) {}
+                }, 1500);
+            });
+
+            peerInstance.on('error', (err) => {
+                const tipo = err?.type || '';
+                if (tipo === 'unavailable-id') {
+                    // El ID está ocupado (otra sesión del mismo usuario o conexión fantasma):
+                    // reintentar con un sufijo único.
+                    intentosPeerId++;
+                    peerListo = false;
+                    try { peerInstance.destroy(); } catch(e) {}
+                    peerInstance = null;
+                    setTimeout(inicializarPeerJS, 300);
+                    return;
+                }
+                if (tipo === 'peer-unavailable') {
+                    const idDestino = (err.message || '').trim().split(/\s+/).pop();
+                    if (idDestino) marcarPeerNoDisponible(idDestino);
+                    return;
+                }
+                if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(tipo)) {
+                    peerListo = false;
+                    setTimeout(() => {
+                        try { peerInstance?.reconnect?.(); } catch(e) {}
+                    }, 2500);
+                }
+                console.warn('PeerJS error:', tipo, err?.message || err);
+            });
 
             peerInstance.on('call', async (call) => {
                 const emisor = call.metadata?.emisor || call.peer.replace('wasapedro_peer_', '');
@@ -1574,7 +1741,6 @@
                     return;
                 }
 
-                if (!streamLocal) return;
                 if (esGrupo && chatActivo !== idChat) return;
 
                 delete llamadasPendientesEntrantes[emisor];
@@ -1584,13 +1750,15 @@
 
         let llamadaPendientePorPeer = null;
 
-        function llamarYResponderPeer(call, emisor) {
+        async function llamarYResponderPeer(call, emisor) {
             try {
-                if (llamadasPeers[emisor]) {
+                if (llamadasPeers[emisor] && llamadasPeers[emisor] !== call) {
                     try { llamadasPeers[emisor].close(); } catch(e) {}
                 }
                 llamadasPeers[emisor] = call;
-                call.answer(streamLocal);
+                // Asegurar que tenemos stream antes de responder (si la cámara falla, solo audio)
+                const stream = await asegurarStreamLocal();
+                call.answer(stream);
                 vincularEventosLlamadaPeer(call, emisor);
             } catch (e) {
                 console.warn('No se pudo responder a la llamada:', e);
@@ -1614,14 +1782,13 @@
             });
 
             call.on('close', () => {
+                // Si esta call fue reemplazada por un reintento, ignorar su cierre
+                const esCallVigente = llamadasPeers[usuario] === call || llamadaPeer === call;
+                if (!esCallVigente) return;
+
                 if (esLlamadaGrupal) {
                     eliminarParticipanteLlamada(usuario);
                     delete llamadasPeers[usuario];
-                    const activos = Object.keys(llamadasPeers).length;
-                    if (activos === 0 && usuario !== miNombre) {
-                        const restantes = participantesLlamada.filter(p => p === miNombre);
-                        if (restantes.length === 1 && !esLlamadaGrupal) finalizarLlamada(false);
-                    }
                 } else {
                     finalizarLlamada(false);
                 }
@@ -1685,10 +1852,12 @@
             actualizarBotonVideoLlamada();
 
             try {
-                streamLocal = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                document.getElementById('video-local').srcObject = streamLocal;
-                miCamaraActiva = true;
-                miMicActivo = true;
+                const stream = await asegurarStreamLocal();
+                if (!stream) throw new Error('sin medios');
+
+                // Esperar registro PeerJS antes de anunciar que nos unimos
+                const listo = await esperarPeerListo(8000);
+                if (!listo) throw new Error('peer no listo');
 
                 const respuesta = {
                     tipoSist: 'respuesta_llamada',
@@ -1747,12 +1916,14 @@
             if (esGrupo) renderizarParticipantesLlamada();
 
             try {
-                streamLocal = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                document.getElementById('video-local').srcObject = streamLocal;
-                miCamaraActiva = true;
-                miMicActivo = true;
+                const stream = await asegurarStreamLocal();
+                if (!stream) throw new Error('sin medios');
                 document.getElementById('fallback-foto-local').classList.add('hidden');
                 if (esGrupo) renderizarParticipantesLlamada();
+
+                // Esperar a que PeerJS esté registrado antes de invitar
+                const listo = await esperarPeerListo(8000);
+                if (!listo) throw new Error('peer no listo');
 
                 const payloadInv = {
                     tipoSist: 'llamada_entrante',
@@ -1771,7 +1942,7 @@
                 // La llamada WebRTC se inicia cuando el destinatario acepta la invitación
                 // MQTT. Así no quedan conexiones entrantes pendientes sin responder.
             } catch (e) {
-                alert('Permiso de cámara o micrófono denegado.');
+                alert('No se pudo iniciar la videollamada: ' + (e?.message || 'permiso de cámara o micrófono denegado.'));
                 finalizarLlamada(false);
             }
         }
@@ -2311,16 +2482,7 @@
                         }
 
                         iniciarTimerLlamada();
-
-                        if (streamLocal && peerInstance) {
-                            const peerDestino = data.peerId || ('wasapedro_peer_' + usuario);
-                            const peerCall = peerInstance.call(peerDestino, streamLocal, {
-                                metadata: { emisor: miNombre, esGrupo: esLlamadaGrupal, idChat: data.idChat || chatActivo }
-                            });
-                            llamadasPeers[usuario] = peerCall;
-                            if (!esLlamadaGrupal) llamadaPeer = peerCall;
-                            vincularEventosLlamadaPeer(peerCall, usuario);
-                        }
+                        marcarLlamadaSaliente(usuario, data);
                         return;
                     }
 
