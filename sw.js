@@ -107,20 +107,20 @@ self.addEventListener('push', (event) => {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
-// Manejar clic en la notificación
+// Manejar clic en la notificación: abrir/reanimar la app.
+// Si la app estaba cerrada, se abre una nueva pestaña; si estaba en segundo plano,
+// se pone en foco y se navega a la raíz para sincronizar el estado.
 self.addEventListener('notificationclick', (event) => {
     event.notification.close();
-    const notificationData = event.notification.data || {};
-    const targetUrl = typeof notificationData === 'string'
-      ? notificationData
-      : (notificationData.url || './');
+    const notificationData = (event.notification.data || {});
+    const targetUrl = typeof notificationData === 'string' ? notificationData : (notificationData.url || './');
 
     event.waitUntil(
         clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
             for (const client of clientList) {
-                if (client.url && 'focus' in client) {
+                if (client.url && client.url.startsWith(self.location.origin + '/') && 'focus' in client) {
                     return client.focus().then(() => {
-                      if ('navigate' in client && targetUrl) return client.navigate(targetUrl);
+                        if ('navigate' in client) return client.navigate(targetUrl);
                     });
                 }
             }

@@ -304,6 +304,7 @@
                         </div>
                     </div>
                     <div class="flex gap-1 text-gray-400">
+                        <button onclick="volverANotebookPG()" title="Volver a NotebookPG" class="p-2 rounded-xl hover:bg-dark-700 hover:text-white transition-all"><i class="ph ph-notebook text-xl"></i></button>
                         <button onclick="abrirModalGrupo()" class="p-2 rounded-xl hover:bg-dark-700 hover:text-white transition-all"><i class="ph ph-users-three text-xl"></i></button>
                         <button onclick="abrirModalConfiguracion()" class="p-2 rounded-xl hover:bg-dark-700 hover:text-white transition-all"><i class="ph ph-gear text-xl"></i></button>
                     </div>
@@ -354,8 +355,8 @@
                     </div>
                     
                     <div class="flex items-center gap-1">
-                        <button onclick="iniciarVideollamada()" title="Iniciar Videollamada" class="text-gray-400 hover:text-white p-2 rounded-xl hover:bg-dark-700 transition-all">
-                            <i class="ph ph-video-camera text-xl"></i>
+                        <button id="btn-video-llamada" onclick="handleVideoCallButton()" title="Iniciar Videollamada" class="text-gray-400 hover:text-white p-2 rounded-xl hover:bg-dark-700 transition-all">
+                            <i id="icono-video-llamada" class="ph ph-video-camera text-xl"></i>
                         </button>
 
                         <div class="relative">
@@ -454,6 +455,9 @@
             </button>
             <button id="btn-toggle-cam" onclick="toggleCamaraLlamada()" class="w-12 h-12 rounded-full bg-dark-700 text-white flex items-center justify-center hover:bg-dark-600 transition-all" title="Cámara">
                 <i id="icono-cam" class="ph ph-video-camera text-xl"></i>
+            </button>
+            <button id="btn-cambiar-cam" onclick="cambiarCamaraLlamada()" class="w-12 h-12 rounded-full bg-dark-700 text-white flex items-center justify-center hover:bg-dark-600 transition-all" title="Cambiar cámara">
+                <i id="icono-cambiar-cam" class="ph ph-switch-camera text-xl"></i>
             </button>
             <button id="btn-toggle-screen" onclick="toggleCompartirPantalla()" class="w-12 h-12 rounded-full bg-dark-700 text-white flex items-center justify-center hover:bg-dark-600 transition-all" title="Compartir Pantalla">
                 <i id="icono-screen" class="ph ph-screenshare text-xl"></i>
@@ -757,6 +761,22 @@
             }
         }
 
+        async function suscribirPushNotificaciones() {
+            if (!registroServiceWorker || !('PushManager' in window)) return null;
+            try {
+                const exists = await registroServiceWorker.pushManager.getSubscription();
+                if (exists) return exists;
+                const sub = await registroServiceWorker.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: null
+                });
+                return sub;
+            } catch (e) {
+                console.warn('No se pudo suscribir al push (esto es normal sin servidor de push):', e);
+                return null;
+            }
+        }
+
         async function solicitarNotificaciones() {
             if (!('Notification' in window) || !('serviceWorker' in navigator)) {
                 alert('Este navegador no permite notificaciones web.');
@@ -775,6 +795,12 @@
                 estado.textContent = '¡Notificaciones activadas!';
                 setTimeout(() => { estado.textContent = ''; }, 3000);
             }
+
+            // Intentar suscripción push (solo funciona si hay un servidor de push configurado;
+            // si no, se registra el SW para notifications locales cuando la app está abierta/oculta).
+            suscribirPushNotificaciones().then(sub => {
+                if (sub) console.info('Push subscription activa:', sub.endpoint);
+            });
         }
 
         async function mostrarNotificacionSW(titulo, cuerpo, url = './', tag = 'wasapedro-mensaje') {
@@ -957,6 +983,23 @@
             document.getElementById("input-codigo-plantilla").value = "";
         }
 
+        function volverANotebookPG() {
+            // Si hay una llamada en curso, avisar antes de salir
+            if (llamadaEnCurso) {
+                if (!confirm("Hay una llamada en curso. \u00bfSalir de todos modos?")) return;
+                finalizarLlamada();
+            }
+            if (clienteMqtt) {
+                try { clienteMqtt.end(true); } catch(e) {}
+                clienteMqtt = null;
+            }
+            document.getElementById("contenedor-wasapedro").classList.add("hidden");
+            document.getElementById("app-notebook-pg").style.display = "";
+            document.body.className = "h-screen w-screen flex flex-col overflow-hidden select-none relative bg-slate-100 text-slate-800";
+            document.getElementById("meta-theme").setAttribute("content", "#f1f5f9");
+            renderizarNotebook();
+        }
+
         function procesarCodigoPlantilla() {
             const input = document.getElementById("input-codigo-plantilla");
             const codigo = input.value.trim();
@@ -1026,6 +1069,7 @@
         let enPantallaCompartida = false;
         let mediaRecorder = null;
         let fragmentosAudio = [];
+        let grupoConCallActivada = null; // idChat del grupo con llamada activa (para mostrar boton Unete)
         let estaGrabandoAudio = false;
 
         let participantesLlamada = [];
@@ -1597,8 +1641,75 @@
             if (el) el.textContent = '00:00';
         }
 
+
+        function handleVideoCallButton() {
+            if (chatActivo && esLlamadaGrupal && grupoConCallActivada === chatActivo && !participantesLlamada.includes(miNombre)) {
+                unirseALlamadaGrupal();
+                return;
+            }
+            iniciarVideollamada();
+        }
+
+        function actualizarBotonVideoLlamada() {
+            const btn = document.getElementById('btn-video-llamada');
+            const icono = document.getElementById('icono-video-llamada');
+            if (!btn || !icono) return;
+
+            if (chatActivo && grupoConCallActivada === chatActivo && esLlamadaGrupal && !participantesLlamada.includes(miNombre)) {
+                btn.className = 'bg-green-600 hover:bg-green-500 text-white p-2 rounded-xl transition-all';
+                icono.className = 'ph ph-users-three text-xl';
+                btn.title = 'Unirse a la videollamada grupal';
+            } else {
+                btn.className = 'text-gray-400 hover:text-white p-2 rounded-xl hover:bg-dark-700 transition-all';
+                icono.className = 'ph ph-video-camera text-xl';
+                btn.title = 'Iniciar Videollamada';
+            }
+        }
+
+        async function unirseALlamadaGrupal() {
+            if (!chatActivo || !grupoConCallActivada || grupoConCallActivada !== chatActivo) return;
+
+            cerrarModalLlamadaEntrante();
+            esLlamadaGrupal = true;
+            llamadaEnCurso = true;
+            llamadaContestada = false;
+
+            participantesLlamada = obtenerMiembrosLlamada(chatActivo);
+            prepararInterfazLlamada(true, chatActivo, '');
+            actualizarBotonVideoLlamada();
+
+            try {
+                streamLocal = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                document.getElementById('video-local').srcObject = streamLocal;
+                miCamaraActiva = true;
+                miMicActivo = true;
+
+                const respuesta = {
+                    tipoSist: 'respuesta_llamada',
+                    emisor: miNombre,
+                    idChat: chatActivo,
+                    esGrupo: true,
+                    aceptada: true,
+                    peerId: miPeerId,
+                    fotoEmisor: miFotoB64,
+                    timestamp: Date.now()
+                };
+                clienteMqtt.publish(`wasapedro/v3/grupo/${chatActivo}`, JSON.stringify(respuesta), { qos: 1 });
+            } catch (e) {
+                llamadaEnCurso = false;
+                finalizarLlamada(false);
+                alert('No se pudo acceder a la cámara o al micrófono.');
+            }
+        }
+
         async function iniciarVideollamada() {
             if (!chatActivo) return;
+
+            // Si hay llamada grupal activa y no estamos participando, unirse en lugar de iniciar nueva
+            if (esLlamadaGrupal && grupoConCallActivada === chatActivo && !participantesLlamada.includes(miNombre)) {
+                unirseALlamadaGrupal();
+                return;
+            }
 
             const esGrupo = !!datosGrupos[chatActivo];
             esLlamadaGrupal = esGrupo;
@@ -1608,6 +1719,7 @@
             participantesLlamada = esGrupo ? obtenerMiembrosLlamada(chatActivo) : [miNombre, chatActivo];
 
             prepararInterfazLlamada(esGrupo, chatActivo, esGrupo ? '' : chatActivo);
+            actualizarBotonVideoLlamada();
 
             if (!esGrupo) {
                 const nombreTarget = obtenerNombreLlamada(chatActivo);
@@ -1728,6 +1840,59 @@
             }
         }
 
+        async function cambiarCamaraLlamada() {
+            if (!llamadaEnCurso || !navigator.mediaDevices?.enumerateDevices) return;
+            try {
+                const dispositivos = await navigator.mediaDevices.enumerateDevices();
+                const camaras = dispositivos.filter(d => d.kind === 'videoinput');
+                if (camaras.length < 2) {
+                    const estado = document.getElementById('texto-estado-llamada');
+                    if (estado) {
+                        const previo = estado.textContent;
+                        estado.textContent = 'Solo hay una cámara disponible';
+                        setTimeout(() => { estado.textContent = previo; }, 1800);
+                    }
+                    return;
+                }
+                if (!streamLocal) return;
+                const pistaActual = streamLocal.getVideoTracks()[0];
+                const etiquetaActual = pistaActual?.label || '';
+                const indice = camaras.findIndex(c => c.label === etiquetaActual);
+                const siguiente = camaras[(indice + 1) % camaras.length];
+
+                const nuevoStream = await navigator.mediaDevices.getUserMedia({
+                    video: { deviceId: { exact: siguiente.deviceId } },
+                    audio: false
+                });
+                const nuevaPista = nuevoStream.getVideoTracks()[0];
+                if (!nuevaPista) { nuevoStream.getTracks().forEach(t => t.stop()); return; }
+
+                nuevaPista.enabled = miCamaraActiva;
+
+                // Reemplazar la pista en todos los peers de la llamada
+                Object.values(llamadasPeers || {}).forEach(call => {
+                    if (!call?.peerConnection) return;
+                    const sender = call.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+                    if (sender) sender.replaceTrack(nuevaPista).catch(() => {});
+                });
+                if (llamadaPeer?.peerConnection) {
+                    const sender = llamadaPeer.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+                    if (sender) sender.replaceTrack(nuevaPista).catch(() => {});
+                }
+
+                // Detener la pista anterior y actualizar el stream local
+                if (pistaActual) pistaActual.stop();
+                streamLocal.removeTrack(pistaActual);
+                streamLocal.addTrack(nuevaPista);
+                document.getElementById('video-local').srcObject = streamLocal;
+
+                // Si compartiamos pantalla, al cambiar de camara dejamos de compartirla
+                if (enPantallaCompartida) detenerCompartirPantalla();
+            } catch (e) {
+                console.warn('No se pudo cambiar de camara:', e);
+            }
+        }
+
         function toggleCamaraLlamada() {
             if (streamLocal) {
                 const videoTrack = streamLocal.getVideoTracks()[0];
@@ -1789,6 +1954,8 @@
                 try { call.close(); } catch(e) {}
             });
             llamadasPeers = {};
+            grupoConCallActivada = null;
+            actualizarBotonVideoLlamada();
 
             if (llamadaPeer) {
                 try { llamadaPeer.close(); } catch(e) {}
@@ -2130,6 +2297,9 @@
 
                         if (esLlamadaGrupal) {
                             actualizarParticipanteLlamada(usuario, null, 'Conectando...');
+                            // Marcar que este grupo tiene una llamada activa para mostrar boton Unete
+                            if (data.idChat) grupoConCallActivada = data.idChat;
+                            actualizarBotonVideoLlamada();
                         } else {
                             document.getElementById('overlay-espera-llamada').classList.add('hidden');
                         }
@@ -2389,6 +2559,12 @@
             if (!REGEX_IDENTIFICADOR.test(nom)) {
                 return alert("El ID solo puede contener letras, números, guion o guion bajo.");
             }
+            // Verificar que el usuario exista realmente (registro global distribuido por MQTT)
+            const registroGlobal = leerJSONLocal("wasapedro_registro_global", {});
+            const usuarioExiste = !!registroGlobal[nom] || !!registrosPresenciaAmigos[nom];
+            if (!usuarioExiste) {
+                return alert(`El usuario "${nom}" no existe en WasaPedro. Verifica el ID e intenta de nuevo.`);
+            }
             if (!listaAmigosActivos.includes(nom)) {
                 listaAmigosActivos.push(nom);
                 localStorage.setItem("wasapedro_amigos_list", JSON.stringify(listaAmigosActivos));
@@ -2473,6 +2649,9 @@
                 }
             });
 
+
+            // Actualizar el boton de videollamada segun el estado de la llamada grupal
+            setTimeout(actualizarBotonVideoLlamada, 0);
             document.getElementById("pantalla-chat-vacia").classList.add("hidden");
             document.getElementById("pantalla-chat-activa").classList.remove("hidden");
             document.getElementById("pantalla-chat-activa").classList.add("flex");
@@ -2584,9 +2763,9 @@
                 } else if (m.urlArchivo) {
                     const archivo = urlSegura(m.urlArchivo);
                     const nombreArchivo = escaparHTML(m.nombreArchivo || 'archivo');
-                    if (archivo) {
-                        contenido = `<a href="${escaparHTML(archivo)}" download="${nombreArchivo}" class="text-xs text-brand-400 underline flex items-center gap-1"><i class="ph ph-file-arrow-down text-base"></i> ${nombreArchivo || 'Descargar archivo'}</a>`;
-                    }
+                    contenido = archivo
+                        ? `<a href="${escaparHTML(archivo)}" download="${escaparHTML(m.nombreArchivo || 'archivo')}" class="text-xs text-brand-400 underline flex items-center gap-1 max-w-[220px]"><i class="ph ph-file-arrow-down text-base flex-shrink-0"></i> <span class="truncate">${nombreArchivo}</span></a>`
+                        : `<span class="text-xs text-gray-300 flex items-center gap-1.5"><i class="ph ph-file text-base"></i> ${nombreArchivo} <span class="text-gray-500">(archivo no disponible)</span></span>`;
                 }
 
                 const hora = new Date(m.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -2618,7 +2797,7 @@
 
                 div.innerHTML = `
                     <div class="max-w-[75%] ${esMio ? 'items-end' : 'items-start'} flex flex-col">
-                        <div class="mensaje-seleccionable ${esMio ? 'bg-brand-600 rounded-2xl rounded-tr-none' : 'bg-dark-800 border border-dark-700 rounded-2xl rounded-tl-none'} p-3 shadow-md w-full">
+                        <div class="mensaje-seleccionable ${esMio ? 'bg-brand-600 rounded-2xl rounded-tr-none' : 'bg-dark-800 border border-dark-700 rounded-2xl rounded-tl-none'} p-3 shadow-md w-fit max-w-full">
                             ${!esMio && datosGrupos[chatActivo] ? `<span class="text-[10px] font-bold text-brand-400 block mb-1">${escaparHTML(m.emisor)}</span>` : ''}
                             ${contenido}
                             <div class="flex items-center justify-end gap-1 mt-1">
